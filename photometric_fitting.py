@@ -13,10 +13,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from glob import glob
 
-from poses.pose_utils import proj_geo
-from poses.pose_utils import get_rott_geo_global
-from poses.pose_utils import get_rott_geo
-#from poses.pose_utils import multi_proj
+from poses.pose_utils import proj_geo_AA
+from poses.pose_utils import get_rott_geo_AA
 
 sys.path.append('./models/')
 from FLAME import FLAME, FLAMETex
@@ -43,24 +41,19 @@ class PhotometricFitting(object):
         exp = nn.Parameter(torch.zeros(bz, self.config.expression_params).float().to(self.device))
         pose = nn.Parameter(torch.zeros(bz, self.config.pose_params).float().to(self.device))
         lights = nn.Parameter(torch.zeros(N_imgs, 9, 3).float().to(self.device))
-        """ #rotation and Translation vector init
-        RotTranVec=torch.zeros(N_imgs,6)
-        RotTranVec[:, 0] = 0.1
-        RotTranVec = nn.Parameter(RotTranVec.float().to(self.device))
-        #focal init
-        focal = torch.Tensor([self.image_size])
-        #print("check focal:", focal)
-        focal = nn.Parameter(focal.float().to(self.device)) """
-        #euler representation
-        euler = nn.Parameter(torch.zeros(N_imgs, 3).float().to(self.device))
+
+        #axis and angle representation
+        rotVec = torch.zeros(N_imgs, 3)
+        rotVec[:,0] = 0.1
+        rotVec = nn.Parameter(rotVec.float().to(self.device))
         trans = nn.Parameter(torch.zeros(N_imgs, 3).float().to(self.device))
         scale = torch.zeros(1, 1)
         scale[0, 0] = 0.09 
         scale = nn.Parameter(scale.float().to(self.device))
+
         
-        #e_opt = torch.optim.Adam([shape, exp, pose, cam, tex, lights], lr=self.config.e_lr, betas=(0.9, 0.999))
         e_opt0 = torch.optim.Adam([scale], lr=self.config.e_lr*.01)
-        e_opt1 = torch.optim.Adam([euler, trans], lr=self.config.e_lr)
+        e_opt1_AA = torch.optim.Adam([rotVec, trans], lr=self.config.e_lr)
         e_opt2 = torch.optim.Adam([shape, exp, pose], lr=self.config.e_lr)
         e_opt3 = torch.optim.Adam([tex, lights], lr=self.config.e_lr)
         
@@ -70,78 +63,29 @@ class PhotometricFitting(object):
 
         # rigid fitting of pose and camera with 51 static face landmarks,
         # this is due to the non-differentiable attribute of contour landmarks trajectory
-        #for k in range(1000):
         for k in range(3000):
             cam_param = self.cam_params
-            """ #camera matrix interMat/exterMat init
-            interMat = torch.Tensor([[focal, 0, self.image_size/2],
-                                     [0, focal, self.image_size/2],
-                                     [0, 0, 1]])#[3,3]
-            exterMat = CamExsInit(RotTranVec)#N*3*4 """
 
             losses = {}
             _, landmarks3d = self.flame.forward_dynamic(
                 shape_params=shape, expression_params=exp, pose_params=pose)    
             landmarks3d = landmarks3d.repeat(N_imgs,1,1)
             landmarks3d = scale.unsqueeze(0)*landmarks3d
-            landmarks2d = proj_geo(landmarks3d, cam_param, euler, trans, Rts)
+            landmarks2d = proj_geo_AA(landmarks3d, cam_param, rotVec, trans, Rts)
             landmarks2d = landmarks2d / self.image_size*2-1
-
-            
-            """ #print("cakics:",landmarks3d[0,0])
-            landmarks3d_temp = landmarks3d.view(68, 3)
-            #print("cakics:",landmarks3d_temp[0])
-            landmarks3d_temp = torch.transpose(landmarks3d_temp, 0, 1)#[3,68]
-            bottom = torch.ones(1, 68)
-            landmarks3d_temp = torch.cat((landmarks3d_temp, bottom), 0)#[4,68]
-            landmarks2d_es = torch.zeros(N_imgs, 68 ,2)
-            for i in range(N_imgs):
-                landmarks3d_pro = torch.mm(interMat, torch.mm(exterMat[i], landmarks3d_temp))#[3,68]
-                landmarks3d_pro_z = landmarks3d_pro[2]
-                landmarks3d_pro = landmarks3d_pro[:2, :] 
-                landmarks3d_pro = torch.div(landmarks3d_pro, landmarks3d_pro_z)#[2,68]
-                landmarks3d_pro = torch.transpose(landmarks3d_pro, 0, 1)#[68,2]
-                landmarks3d_pro[:, 0] = landmarks3d_pro[:, 0] / float(self.image_size) * 2 - 1
-                landmarks3d_pro[:, 1] = landmarks3d_pro[:, 1] / float(self.image_size) * 2 - 1
-                landmarks2d_es[i] = landmarks3d_pro 
-            landmarks2d_es = fiting_util.batch_orth_proj(landmarks2d_es, cam)
-            landmarks2d_es[..., 1:] = - landmarks2d_es[..., 1:] """
-            """ #landmarks2d_es = torch.zeros(N_imgs, 3, 68)
-            landmarks2d_es = multi_proj(landmarks3d_temp, interMat, exterMat)
-            #landmarks2d_es = torch.transpose(landmarks2d_es, 1, 2)
-            landmarks2d_es[:,:,:2] = landmarks2d_es[:,:,:2] / float(self.image_size) * 2 - 1 """
     
             losses['landmark'] = util.l2_distance(
                 landmarks2d[:, 17:, :2], gt_landmark[:, 17:, :2])* self.config.w_lmks
-            """ losses['landmark'] = fiting_util.l2_distance(landmarks2d_es[:, :, :2], gt_landmark[:, :, :2]) * self.config.w_lmks
-            if k==1:
-                input=images[9].float().cpu().numpy().transpose((1,2,0))*255.
-                cv2.imwrite('./test_results/TestFace_origin/landgt.png',input.astype(np.float32))
-            if k==999:
-                input=images[9].float().cpu().numpy().transpose((1,2,0))*255.
-                landtest=landmarks2d_es[9].float().cpu()
-                landtest=(landtest+1.)/2*float(self.image_size)
-                print(input.shape)
-                print("lhsvf",landtest[30])
-                cv2.circle(input, (112,112), 20, (0,255,0), 3, cv2.LINE_AA)
-                #for j in range(68):
-                 #   cv2.circle(input, (int(landtest[j,0]),int(landtest[j,1])), 8, (0,255,0), 3 , cv2.LINE_AA)
-                cv2.imwrite('./test_results/TestFace_origin/land.png',input.astype(np.float32)) """
-            
-        
-            
-                
-
 
             all_loss = 0.
             for key in losses.keys():
                 all_loss = all_loss + losses[key]
             losses['all_loss'] = all_loss
             e_opt0.zero_grad()
-            e_opt1.zero_grad()
+            e_opt1_AA.zero_grad()
             all_loss.backward()
             e_opt0.step()
-            e_opt1.step()
+            e_opt1_AA.step()
 
             loss_info = '----iter: {}, time: {}\n'.format(k, datetime.datetime.now().strftime('%Y-%m-%d-%H:%M:%S'))
             for key in losses.keys():
@@ -155,52 +99,27 @@ class PhotometricFitting(object):
                           cx=self.cam_params[0,2], cy=self.cam_params[0,3], batch_size=render_ids.shape[0], 
                           device=self.cam_params.device, focal_length = self.cam_params[:, :2], 
                           pri_point = self.cam_params[:, 2:])#.to(self.device)
-        #for k in range(1000,2000):
-        for k in range(3000, 8000):
+        for k in range(3000, 5001):
             tex_param = tex.expand(N_imgs, -1)
             cam_param = self.cam_params
-            """ #camera matrix interMat/exterMat init
-            interMat = torch.Tensor([[focal, 0, self.image_size/2],
-                                     [0, focal, self.image_size/2],
-                                     [0, 0, 1]])
-            exterMat = CamExsInit(RotTranVec) """
 
             losses = {}
             vertices, landmarks3d = self.flame.forward_dynamic(
                 shape_params=shape, expression_params=exp, pose_params=pose)
             landmarks3d = landmarks3d.repeat(N_imgs,1,1)
             vertices = vertices.repeat(N_imgs,1,1)
-
-            
-            """ landmarks3d_temp = landmarks3d.view(68, 3)
-            landmarks3d_temp = torch.transpose(landmarks3d_temp, 0, 1)#[3,68]
-            bottom = torch.ones(1, 68)
-            landmarks3d_temp = torch.cat((landmarks3d_temp, bottom), 0)#[4,68]
-            landmarks2d_es = torch.zeros(N_imgs, 68 ,2)
-            for i in range(N_imgs):
-                landmarks3d_pro = torch.mm(interMat, torch.mm(exterMat[i], landmarks3d_temp))#[3,68]
-                landmarks3d_pro_z = landmarks3d_pro[2]
-                landmarks3d_pro = landmarks3d_pro[:2, :] 
-                landmarks3d_pro = torch.div(landmarks3d_pro, landmarks3d_pro_z)#[2,68]
-                landmarks3d_pro = torch.transpose(landmarks3d_pro, 0, 1)#[68,2]
-                landmarks3d_pro[:, 0] = landmarks3d_pro[:, 0] / float(self.image_size) * 2 - 1
-                landmarks3d_pro[:, 1] = landmarks3d_pro[:, 1] / float(self.image_size) * 2 - 1
-                landmarks2d_es[i] = landmarks3d_pro
-            landmarks2d_es = fiting_util.batch_orth_proj(landmarks2d_es, cam)
-            landmarks2d_es[..., 1:] = - landmarks2d_es[..., 1:] """
             landmarks3d = scale.unsqueeze(0)*landmarks3d
             vertices = scale.unsqueeze(0)*vertices
-
-            landmarks2d = proj_geo(landmarks3d, cam_param, euler, trans, Rts)
+            landmarks2d = proj_geo_AA(landmarks3d, cam_param, rotVec, trans, Rts)
             landmarks2d = landmarks2d / self.image_size*2-1
-            rott_vertices = get_rott_geo_global(vertices, euler, trans, Rts)
+            rott_vertices = get_rott_geo_AA(vertices, rotVec, trans)
             albedo = self.flametex(tex_param, uv_coords)
 
             losses['landmark'] = util.l2_distance(
                 landmarks2d[:, :, :2], gt_landmark[:, :, :2])* self.config.w_lmks
-            losses['shape_reg'] = (torch.sum(shape ** 2) / 2) * self.config.w_shape_reg  # *1e-4
+            losses['shape_reg'] = (torch.sum(shape ** 2) / 2) * self.config.w_shape_reg    # *1e-4
             losses['expression_reg'] = (torch.sum(exp ** 2) / 2) * self.config.w_expr_reg  # *1e-4
-            losses['pose_reg'] = (torch.sum(pose ** 2) / 2) * self.config.w_pose_reg
+            losses['pose_reg'] = (torch.sum(pose ** 2) / 2) * self.config.w_pose_reg       # *1e-4
             
             ## render
             rott_for_render = rott_vertices[render_ids].clone()
@@ -209,26 +128,6 @@ class PhotometricFitting(object):
             render_imgs = render_imgs / 255.
             render_mask = render_imgs[:, 3:4, :, :]
             render_imgs = render_imgs[:, :3, :, :]
-            """ albedos = self.flametex(tex) / 255.
-            vertices_multi = torch.zeros((N_imgs,vertices.shape[1],vertices.shape[2]))
-            trans_vertices_multi = torch.zeros((N_imgs,vertices.shape[1],vertices.shape[2]))
-            for i in range(N_imgs):
-                vertices_temp = vertices[0]#[:,3]
-                vertices_temp = torch.transpose(vertices_temp, 0, 1)
-                bottom = torch.ones(1, vertices_temp.shape[1])
-                vertices_temp = torch.cat((vertices_temp, bottom), 0)#[4,:]
-                vertices_temp = torch.mm(exterMat[i], vertices_temp)#[3:,]
-                vertices_multi[i] = torch.transpose(vertices_temp,0,1)
-                vertices_temp = torch.unsqueeze(torch.transpose(vertices_temp,0,1), 0)#[1,:,3]
-                trans_vertices_multi[i] = fiting_util.batch_orth_proj(vertices_temp, cam)[0]
-                trans_vertices_multi[i, :, 1:] = - trans_vertices_multi[i, :, 1:]
-            ops = self.render(vertices_multi, trans_vertices_multi, albedos, lights)
-            predicted_images = ops['images']
-            print("achsvbck:",lights[1,5])
-            #print("achsvbck:", predicted_images.shape)
-            predicted_image = predicted_images[9].detach().float().cpu().numpy().transpose((1,2,0))*255.
-            if k % 500 ==0:
-                cv2.imwrite('./test_results/TestFace_origin/{}.jpg'.format(k),predicted_image.astype(np.float32)) """
             losses['photometric_texture'] = ((
                 image_masks[render_ids]*images[render_ids] - (render_imgs[:, :3, :, :])).abs()).mean() * self.config.w_pho
             #losses['mask'] = (render_mask - image_masks[render_ids]).abs().mean()*10
@@ -239,11 +138,11 @@ class PhotometricFitting(object):
                 all_loss = all_loss + losses[key]
             losses['all_loss'] = all_loss
             e_opt0.zero_grad()
-            e_opt1.zero_grad()
+            e_opt1_AA.zero_grad()
             e_opt2.zero_grad()
             e_opt3.zero_grad()
             all_loss.backward()
-            e_opt1.step()
+            e_opt1_AA.step()
             e_opt0.step()
             e_opt2.step()
             e_opt3.step()
@@ -257,16 +156,10 @@ class PhotometricFitting(object):
 
             if k % 10 == 0:
                 print(loss_info)
-            
-            #for quick test
-            """ if k % 1000 == 0 or k == 8000-1:
-                predicted_image = render_imgs[1].detach().float().cpu().numpy().transpose((1,2,0))
-                predicted_image = predicted_image[:,:,:3]
-                cv2.imwrite('./test_results/2-346_2/{}.jpg'.format(k),predicted_image.astype(np.float32)) """
 
             
             # visualize
-            if k % 1000 == 0 or k == 8000-1:
+            if k % 1000 == 0:
                 grids = {}
                 visind = range(N_imgs)
                 grids['images'] = torchvision.utils.make_grid(images[visind]).detach().cpu()
@@ -275,7 +168,6 @@ class PhotometricFitting(object):
                     util.tensor_vis_landmarks(images[visind], landmarks[visind]))
                 grids['landmarks2d'] = torchvision.utils.make_grid(
                     util.tensor_vis_landmarks(images[visind], landmarks2d[visind]))
-                #grids['tex'] = torchvision.utils.make_grid(F.interpolate(albedos[visind], [224, 224])).detach().cpu()
                 grid = torch.cat(list(grids.values()), 1)
                 grid_image = (grid.numpy().transpose(1, 2, 0).copy() * 255)[:, :, [0, 1, 2]]
                 grid_image = np.minimum(np.maximum(grid_image, 0), 255).astype(np.uint8)
@@ -291,9 +183,7 @@ class PhotometricFitting(object):
             'albedos':albedo.detach().cpu().numpy(),
             'tex': tex.detach().cpu().numpy(),
             'lit': lights.detach().cpu().numpy(),
-            #'RotTranVec': RotTranVec.detach().cpu().numpy(),
-            #'focal': focal.detach().cpu().numpy()
-            'euler': euler.detach().cpu().numpy(),
+            'rotVec': rotVec.detach().cpu().numpy(),
             'trans': trans.detach().cpu().numpy(),
             'scale': scale.detach().cpu().numpy()
         }
@@ -302,13 +192,12 @@ class PhotometricFitting(object):
     
 
     def run(self, images, focal, scenepath, landmarkspath, maskpath):
-        # The implementation is potentially able to optimize with images(batch_size>1),
-        # here we try showing the example with multiple images fitting
+        # The implementation is able to optimize with images(batch_size>1),
         N_imgs = images.shape[0]
         input_size = images.shape[2]#square, =height=width
         focal = focal * self.image_size / input_size
         image_masks = []
-        Rts = []
+        Rts = []#extra Rotation and transformation
         cam_paras = []
         for i in range(N_imgs):
             Rt = np.eye(4)
@@ -329,7 +218,7 @@ class PhotometricFitting(object):
 
         # photometric optimization is sensitive to the hair or glass occlusions,
         # therefore we use a face segmentation network to mask the skin region out.
-        #mask
+        #mask landmark image
         for single_mask_path in sorted(os.listdir(maskpath)):
             image_mask_path = os.path.join(maskpath, single_mask_path)
             image_mask = np.load(image_mask_path, allow_pickle=True)
@@ -337,7 +226,6 @@ class PhotometricFitting(object):
             image_mask_bn[np.where(image_mask != 0)] = 1.
             image_masks.append(torch.from_numpy(image_mask_bn[None, :, :, :]))
         
-
         landmarks = np.load(landmarkspath).astype(np.float32)
         landmarks = landmarks/input_size * 2 - 1
         landmarks = torch.from_numpy(landmarks)

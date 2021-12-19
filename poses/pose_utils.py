@@ -248,6 +248,8 @@ def minify_pad_v0(basedir, factors=[], resolutions=[]):
             imageio.imwrite(os.path.join(imgdir, 'image{:03d}.png'.format(i)), (255*pad_img).astype(np.uint8))
 
 def load_image(scenedir, factor=None, width=None, height=None): 
+    #with pad, so the images loaded are square i.e. width==height
+    #if not, convert 'minify_pad_v0' to 'minify_v0'
     img0 = [os.path.join(scenedir, 'images', f) for f in sorted(os.listdir(os.path.join(scenedir, 'images'))) \
             if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')][0]
     sh = imageio.imread(img0).shape
@@ -345,7 +347,7 @@ def minify(basedir, factors=[], resolutions=[]):
         
         
 def load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
-    
+    #used in nerf together with save_pose
     poses_arr = np.load(os.path.join(basedir, 'poses_bounds.npy'))
     poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1,2,0])
     bds = poses_arr[:, -2:].transpose([1,0])
@@ -402,56 +404,8 @@ def load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
     
     print('Loaded image data', imgs.shape, poses[:,-1,0])
     return poses, bds, imgs
-
-    
-def rotVec2Mat(rotVec):#type tensor
-    N = rotVec.shape[0]
-    #rotVec=rotVec.float()
-    rotVecNorm = torch.norm(rotVec, p = 2, dim = 1, keepdim = False)
-    rotMat = torch.zeros([N,3,3])
-    for i in range(N):
-        if rotVecNorm[i]<1e-3:
-            rotMat[i] = torch.eye(3)
-        else:
-            temp = torch.zeros([3,3])
-            temp[0,1] = -rotVec[i,2]
-            temp[0,2] = rotVec[i,1]
-            temp[1,0] = rotVec[i,2]
-            temp[1,2] = -rotVec[i,0]
-            temp[2,0] = -rotVec[i,1]
-            temp[2,1] = rotVec[i,0]
-            #temp=torch.tensor([[0,-rotVec[i,2],rotVec[i,1]],[rotVec[i,2],0,-rotVec[i,0]],[-rotVec[i,1],rotVec[i,0],0]])
-            rotMat[i] = torch.eye(3)+torch.sin(rotVecNorm[i])/rotVecNorm[i]*temp+(1-torch.cos(rotVecNorm[i]))/(rotVecNorm[i]*rotVecNorm[i])*torch.mm(temp,temp)
-    return rotMat    
-
-def CamExsInit(RotTranVec):
-    #input:6 dimmension rotVec+transVec
-    #output:3*4dimmension Camera Extrinsics
-    rotVec = RotTranVec[:,:3]
-    N = rotVec.shape[0]
-    tranVec = RotTranVec[:,3:6]
-    tranVec = torch.reshape(tranVec,(N,3,1))
-    rotMat = rotVec2Mat(rotVec)
-    CEI = torch.cat((rotMat,tranVec),dim=2) 
-    return CEI          
-            
-def multi_proj(geometry, interMat, exterMat):
-    #geometry:3D points [3,:]
-    N_geo = geometry.shape[1]
-    N_proj = exterMat.shape[0]
-    bottom = torch.ones(1, N_geo)
-    geo_hom = torch.cat((geometry, bottom), 0)#[4,68]
-    proj = torch.zeros(N_proj, N_geo, 3)#[proj_x,proj_y,Z] proj_x=fxX / Z+cx
-    for i in range(N_proj):
-        proj_hom = torch.mm(interMat, torch.mm(exterMat[i], geo_hom))#[3,68]
-        proj_z = proj_hom[2]
-        proj_hom[:2] =  torch.div(proj_hom[:2], proj_z)
-        proj[i] = torch.transpose(proj_hom, 0, 1)
-        #landmarks3d_pro = landmarks3d_pro[:2, :] 
-        #landmarks3d_pro = torch.div(landmarks3d_pro, landmarks3d_pro_z)#[2,68]
-        #landmarks3d_pro = torch.transpose(landmarks3d_pro, 0, 1)#[68,2]
-    return proj
-
+           
+        
 
 
 def gen_poses(basedir, match_type, factors=None):
@@ -481,6 +435,65 @@ def gen_poses(basedir, match_type, factors=None):
     
     return True
 
+
+
+### representation: axis and angle (AA)
+def rotVec2rot(rotVec):#type tensor
+    #rotVec: rotation vector, the norm of it == rot_angle
+    batch_size = rotVec.shape[0]
+    rot_angle = torch.norm(rotVec, p = 2, dim = 1, keepdim = False)
+    rotMat = torch.zeros((batch_size, 3, 3))
+    skew = torch.zeros((batch_size, 3, 3))
+    skew[:, 0, 1] = -rotVec[:,2]
+    skew[:,0,2] = rotVec[:,1]
+    skew[:,1,0] = rotVec[:,2]
+    skew[:,1,2] = -rotVec[:,0]
+    skew[:,2,0] = -rotVec[:,1]
+    skew[:,2,1] = rotVec[:,0]
+    rotMat = torch.eye(3).repeat(batch_size,1,1) +(torch.sin(rot_angle)/rot_angle).reshape(batch_size,1,1).repeat(1,3,3)*skew+((1-torch.cos(rot_angle))/(rot_angle*rot_angle)).reshape(batch_size,1,1).repeat(1,3,3)*torch.bmm(skew, skew)
+    for i in range(batch_size):
+        rotMat[i] = torch.eye(3) if rot_angle[i]<1e-3 else rotMat[i]
+    return rotMat 
+
+def rot_trans_geo_AA(geometry, rot, trans):
+    rott_geo = torch.bmm(rot, geometry.permute(0, 2, 1)) + trans[:, :, None]
+    return rott_geo.permute(0, 2, 1)
+
+def get_rott_geo_AA(geometry, rotVec, trans):
+    rot = rotVec2rot(rotVec)
+    rott_geo = rot_trans_geo_AA(geometry, rot, trans)
+    return rott_geo
+
+def get_rott_geo_global_AA(geometry, rotVec, trans, Rts):
+    rot = rotVec2rot(rotVec)
+    rott_geo = rot_trans_geo(geometry, rot, trans)
+    rott_geo = (torch.bmm(Rts[:, :3, :3], rott_geo.permute(0, 2, 1)) + Rts[:, :3, 3:]).permute(0, 2, 1).contiguous()
+    return rott_geo
+
+def proj_geo_AA(geometry, cam, rotVec, trans, Rts):
+    rott_geo = get_rott_geo_AA(geometry, rotVec, trans)
+    rott_geo = (torch.bmm(Rts[:, :3, :3], rott_geo.permute(0, 2, 1)) + Rts[:, :3, 3:]).permute(0, 2, 1).contiguous()
+
+    fx = cam[:, 0]
+    fy = cam[:, 1]
+    cx = cam[:, 2]
+    cy = cam[:, 3]
+
+    X = rott_geo[:, :, 0]
+    Y = rott_geo[:, :, 1]
+    Z = rott_geo[:, :, 2]
+
+    fxX = fx[:, None] * X
+    fyY = fy[:, None] * Y
+
+    proj_x = fxX / Z + cx[:, None]
+    proj_y = fyY / Z + cy[:, None]
+
+    return torch.cat((proj_x[:, :, None], proj_y[:, :, None], Z[:, :, None]), 2)
+
+
+
+### representation: euler  (Eu)
 def euler2rot(euler_angle):
     batch_size = euler_angle.shape[0]
 
@@ -509,24 +522,24 @@ def euler2rot(euler_angle):
     return torch.bmm(rot_x, torch.bmm(rot_y, rot_z))
 
 
-def rot_trans_geo(geometry, rot, trans):
+def rot_trans_geo_Eu(geometry, rot, trans):
     rott_geo = torch.bmm(rot, geometry.permute(0, 2, 1)) + trans[:, :, None]
 
     return rott_geo.permute(0, 2, 1)
 
-def get_rott_geo(geometry, euler_angle, trans):
+def get_rott_geo_Eu(geometry, euler_angle, trans):
     rot = euler2rot(euler_angle)
-    rott_geo = rot_trans_geo(geometry, rot, trans)
+    rott_geo = rot_trans_geo_Eu(geometry, rot, trans)
     return rott_geo
 
-def get_rott_geo_global(geometry, euler_angle, trans, Rts):
+def get_rott_geo_global_Eu(geometry, euler_angle, trans, Rts):
     rot = euler2rot(euler_angle)
-    rott_geo = rot_trans_geo(geometry, rot, trans)
+    rott_geo = rot_trans_geo_Eu(geometry, rot, trans)
     rott_geo = (torch.bmm(Rts[:, :3, :3], rott_geo.permute(0, 2, 1)) + Rts[:, :3, 3:]).permute(0, 2, 1).contiguous()
     return rott_geo
 
-def proj_geo(geometry, cam, euler_angle, trans, Rts):
-    rott_geo = get_rott_geo(geometry, euler_angle, trans)
+def proj_geo_Eu(geometry, cam, euler_angle, trans, Rts):
+    rott_geo = get_rott_geo_Eu(geometry, euler_angle, trans)
     rott_geo = (torch.bmm(Rts[:, :3, :3], rott_geo.permute(0, 2, 1)) + Rts[:, :3, 3:]).permute(0, 2, 1).contiguous()
 
     fx = cam[:, 0]
