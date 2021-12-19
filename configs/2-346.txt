@@ -1,0 +1,3 @@
+scenedir = ./data/2-346
+match_type = exhaustive_matcher
+factor = 1
