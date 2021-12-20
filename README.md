@@ -47,7 +47,7 @@ note3：opencv-python版本这里选择4.1.2.30；anaconda环境‘’envs/env-n
 
 
 
-对于单视角图片，见"./singview"目录下，详情可参考  [photometric_optimization](https://github.com/HavenFeng/photometric_optimization)
+对于单视角图片，见"./SingView"目录下，详情可参考  [photometric_optimization](https://github.com/HavenFeng/photometric_optimization)
 示例命令：
 
 ```
@@ -59,4 +59,5 @@ python photometric_fitting.py 00000
 这里仅包括主要框架，相关大文件需要自行下载并放在指定位置。
 
 [FLAME_texture.npz](https://flame.is.tue.mpg.de/download.php)：放在'./flame-data/'下；
+
 [generic_model.pkl](https://flame.is.tue.mpg.de/download.php)：放在'./flame-data/'下。
